@@ -2,29 +2,25 @@
 """
 read_document.py — Document reading helper for the docx-cowork agent skill.
 
-Converts DOC, DOCX, Pages, ODT, RTF, HTML, and other formats to Markdown,
-and optionally extracts embedded images as base64 for vision-capable models.
-
-Conversion strategy per format:
-  .docx           → pandoc directly (native support)
-  .odt .rtf .html → pandoc directly (native support)
-  .doc .pages     → LibreOffice --headless → .docx, then pandoc
-  anything else   → pandoc first, LibreOffice fallback, error if both fail
+Supported word-processing formats only (no presentations, no web pages):
+  .docx           → pandoc directly (native)
+  .odt  .rtf      → pandoc directly (native)
+  .doc  .pages    → LibreOffice --headless → .docx → pandoc
 
 Usage (CLI):
-    python helpers/read_document.py path/to/file.docx
-    python helpers/read_document.py path/to/file.pages --no-images
-    python helpers/read_document.py path/to/file.doc --output-dir ./out
+    python3 helpers/read_document.py path/to/file.docx
+    python3 helpers/read_document.py path/to/file.pages --no-images
+    python3 helpers/read_document.py path/to/file.doc --output-dir ./out
 
 Usage (Python API):
     from helpers.read_document import read_document, cleanup
 
     result = read_document("report.docx", extract_images=True)
     print(result["markdown"])
-    for img in result["images"]:          # empty list if no images
+    for img in result["images"]:   # empty list if no images / not requested
         # img["mime_type"], img["data"] (base64 str), img["filename"]
         pass
-    cleanup(result["tmp_dir"])            # always call when done
+    cleanup(result["tmp_dir"])     # always call when done
 """
 
 from __future__ import annotations
@@ -40,28 +36,27 @@ import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Format classification
+# Format classification  (word-processing documents only)
 # ---------------------------------------------------------------------------
 
-# pandoc can read these directly (pandoc 3.x input formats relevant here)
-PANDOC_NATIVE: frozenset[str] = frozenset({
-    ".docx", ".odt", ".rtf",
-    ".html", ".htm",
-    ".epub",
-    ".rst",
-    ".tex", ".latex",
-    ".md", ".markdown",
-    ".txt",
+# All formats this skill supports — used for user-facing error messages
+SUPPORTED_FORMATS: frozenset[str] = frozenset({
+    ".docx",   # Microsoft Word (modern Open XML)
+    ".doc",    # Microsoft Word (legacy binary)
+    ".odt",    # OpenDocument Text (LibreOffice / OpenOffice Writer)
+    ".rtf",    # Rich Text Format
+    ".pages",  # Apple Pages
 })
 
-# pandoc cannot read these; LibreOffice is required as the first step
+# pandoc 3.x reads these directly without any pre-conversion step
+PANDOC_NATIVE: frozenset[str] = frozenset({
+    ".docx", ".odt", ".rtf",
+})
+
+# Require LibreOffice to export to .docx first, then pandoc finishes
 LIBREOFFICE_REQUIRED: frozenset[str] = frozenset({
-    ".doc",    # legacy Word binary — pandoc 3.x dropped support
+    ".doc",    # legacy Word binary — pandoc 3.x dropped this format
     ".pages",  # Apple Pages — pandoc has never supported this
-    ".numbers",
-    ".key",
-    ".ppt",
-    ".pps",
 })
 
 # Image extensions we care about passing to the model
@@ -181,6 +176,14 @@ def convert_to_docx(file_path: str, tmp_dir: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
     docx_out = os.path.join(tmp_dir, "document.docx")
 
+    # Reject anything that is not a supported word-processing format
+    if ext not in SUPPORTED_FORMATS:
+        raise ValueError(
+            f"Unsupported file format: '{ext}'.\n"
+            "docx-cowork supports word-processing documents only.\n"
+            "Supported: " + ", ".join(sorted(SUPPORTED_FORMATS))
+        )
+
     # Already DOCX — just copy so we have a clean working copy
     if ext == ".docx":
         shutil.copy2(file_path, docx_out)
@@ -192,33 +195,9 @@ def convert_to_docx(file_path: str, tmp_dir: str) -> tuple[str, list[str]]:
         shutil.move(lo_docx, docx_out)
         return docx_out, warnings
 
-    # Formats pandoc handles natively
-    if ext in PANDOC_NATIVE:
-        warnings.extend(_pandoc_to_docx(file_path, docx_out))
-        return docx_out, warnings
-
-    # Unknown extension — try pandoc first, then LibreOffice
-    warnings.append(
-        f"Unknown extension '{ext}'. Trying pandoc first, then LibreOffice."
-    )
-    try:
-        warnings.extend(_pandoc_to_docx(file_path, docx_out))
-        return docx_out, warnings
-    except (EnvironmentError, RuntimeError) as pandoc_err:
-        warnings.append(f"pandoc failed: {pandoc_err}")
-
-    try:
-        lo_docx = _libreoffice_to_docx(file_path, tmp_dir)
-        shutil.move(lo_docx, docx_out)
-        return docx_out, warnings
-    except (EnvironmentError, RuntimeError) as lo_err:
-        warnings.append(f"LibreOffice failed: {lo_err}")
-
-    raise RuntimeError(
-        f"Cannot convert '{ext}' to DOCX.\n"
-        "Neither pandoc nor LibreOffice could handle this format.\n"
-        "Supported formats: " + ", ".join(sorted(PANDOC_NATIVE | LIBREOFFICE_REQUIRED | {".docx"}))
-    )
+    # Formats pandoc handles natively (.odt, .rtf)
+    warnings.extend(_pandoc_to_docx(file_path, docx_out))
+    return docx_out, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +290,7 @@ def read_document(file_path: str, extract_images: bool = True) -> dict:
 
     Raises:
         FileNotFoundError  — file_path does not exist
+        ValueError         — unsupported file format
         EnvironmentError   — required tool (pandoc / LibreOffice) not installed
         RuntimeError       — conversion or extraction failed
     """
@@ -380,7 +360,7 @@ def main() -> None:
 
     try:
         result = read_document(args.file, extract_images=extract)
-    except (FileNotFoundError, EnvironmentError, RuntimeError) as exc:
+    except (FileNotFoundError, ValueError, EnvironmentError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
