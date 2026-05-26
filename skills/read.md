@@ -7,6 +7,16 @@ Read, summarize, analyze, or extract content from a word-processing document.
 **Dependencies:** pandoc (always), LibreOffice (only for `.doc` and `.pages`)
 **No pip install needed** — the helper uses only the Python standard library.
 
+**Temp directory location (created automatically per platform):**
+
+| Platform | Location | Example |
+|---|---|---|
+| macOS | `/var/folders/.../T/` | `/var/folders/xy/.../T/docx_cowork_abc123/` |
+| Linux | `/tmp/` | `/tmp/docx_cowork_abc123/` |
+| Windows | `%TEMP%` | `C:\Users\you\AppData\Local\Temp\docx_cowork_abc123\` |
+
+"The OS does not reliably auto-clean these: Linux only clears /tmp on reboot, macOS clears /var/folders after several days, Windows never auto-cleans %TEMP%. Always call cleanup() with the exact path returned by extract() — do not use glob-based rm -rf commands as agents typically block wildcard deletes for safety."
+
 "If the file is not one of those formats, this skill cannot help. Tell the user and ask the agent to check other available skills."
 
 ---
@@ -141,21 +151,13 @@ If `info["warnings"]` is non-empty, show them as informational notes to the user
 
 ### Step 8 — Clean up (REQUIRED, always)
 
-Delete the temp directory when you are done — whether the task succeeded or failed.
+The temp directory is NOT automatically cleaned by the OS on all platforms. Always delete it when done using the exact path returned by `extract()`:
 
 ```python
 cleanup(info["tmp_dir"])
 ```
 
-Bash fallback:
-
-```bash
-# macOS / Linux
-rm -rf /tmp/docx_cowork_*
-
-# Windows (PowerShell)
-Remove-Item "$env:TEMP\docx_cowork_*" -Recurse -Force
-```
+`cleanup()` uses Python's `shutil.rmtree` with the exact path — it works on macOS, Linux, and Windows without needing shell permissions. Do not use glob-based bash commands like `rm -rf /tmp/docx_cowork_*` — agents typically block wildcard deletes.
 
 ---
 

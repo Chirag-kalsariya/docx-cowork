@@ -43,7 +43,7 @@ you need to chain operations (e.g., read a document and then update it).
 
 ## Shared Rules (apply to all sub-skills)
 
-1. **Always clean up.** Delete every temporary file when you are done, whether the task succeeded or failed. Temp dirs are prefixed `docx_cowork_`.
+1. **Always clean up.** Delete the temp directory using `cleanup(info["tmp_dir"])` with the exact path when done — whether the task succeeded or failed. The OS does not reliably auto-clean temp files on all platforms. Use Python's `cleanup()`, not glob-based shell commands.
 2. **Check dependencies first.** Confirm `pandoc` (and `LibreOffice` when needed) are available before starting any conversion. No pip install is required — the helpers use only the Python standard library.
 3. **Unsupported format?** Tell the user clearly, list what IS supported, and ask the agent to check other skills.
 4. **Google Docs?** Ask the user to export to `.docx` first (File → Download → Microsoft Word `.docx`), then proceed.
