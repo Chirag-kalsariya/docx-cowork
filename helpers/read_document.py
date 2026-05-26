@@ -76,9 +76,10 @@ def _require_pandoc() -> str:
     if not path:
         raise EnvironmentError(
             "pandoc is not installed or not on PATH.\n"
-            "  macOS :  brew install pandoc\n"
+            "  macOS:   brew install pandoc\n"
             "  Ubuntu:  sudo apt install pandoc\n"
-            "  Windows: choco install pandoc  (or https://pandoc.org/installing.html)"
+            "  Windows: winget install JohnMacFarlane.Pandoc\n"
+            "           or https://pandoc.org/installing.html"
         )
     return path
 
@@ -88,10 +89,11 @@ def _find_libreoffice() -> str | None:
     candidates = [
         "libreoffice",
         "soffice",
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-        "/usr/bin/libreoffice",
-        "/usr/bin/soffice",
-        "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",   # macOS
+        "/usr/bin/libreoffice",                                    # Linux
+        "/usr/bin/soffice",                                        # Linux alt
+        r"C:\Program Files\LibreOffice\program\soffice.exe",       # Windows
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe", # Windows 32-bit
     ]
     for cmd in candidates:
         found = shutil.which(cmd) or (os.path.isfile(cmd) and cmd)
@@ -136,7 +138,7 @@ def _libreoffice_to_docx(input_path: str, out_dir: str) -> str:
         raise EnvironmentError(
             "LibreOffice is not installed. It is required to convert "
             f"'{Path(input_path).suffix}' files.\n"
-            "  macOS :  brew install --cask libreoffice\n"
+            "  macOS:   brew install --cask libreoffice\n"
             "  Ubuntu:  sudo apt install libreoffice\n"
             "  Windows: https://www.libreoffice.org/download/"
         )

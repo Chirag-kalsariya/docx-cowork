@@ -2,8 +2,10 @@
 
 Read, summarize, analyze, or extract content from a word-processing document.
 
-**Helper:** `helpers/read_document.py`  
+**Helper:** `helpers/read_document.py`
 **Supported formats:** `.docx` `.doc` `.odt` `.rtf` `.pages`
+
+"If the file is not one of those formats, this skill cannot help. Tell the user and ask the agent to check other available skills."
 
 ---
 
@@ -15,10 +17,17 @@ Read, summarize, analyze, or extract content from a word-processing document.
 pandoc --version
 ```
 
-Missing? Stop and tell the user:
-```
-pandoc is required.  brew install pandoc  /  sudo apt install pandoc
-```
+If pandoc is missing, stop and tell the user:
+
+"pandoc is not installed. Please install it and try again."
+
+| Platform | Command |
+|---|---|
+| macOS | `brew install pandoc` |
+| Ubuntu / Debian | `sudo apt install pandoc` |
+| Windows | `winget install JohnMacFarlane.Pandoc` or https://pandoc.org/installing.html |
+
+---
 
 ### Step 2 — Identify the file and format
 
@@ -26,24 +35,28 @@ pandoc is required.  brew install pandoc  /  sudo apt install pandoc
 ls -lh "<file_path>"
 ```
 
-- File missing → ask the user for the correct path.
-- Extension not in `.docx .doc .odt .rtf .pages` → tell the user this format
-  is not supported and list what is. Do not proceed.
+- File not found → ask the user for the correct path.
+- Extension not in `.docx .doc .odt .rtf .pages` → tell the user this format is not supported, list what is, and ask the agent to check other skills.
 
-For `.doc` or `.pages`, also check LibreOffice:
+For `.doc` or `.pages`, also check whether LibreOffice is available:
 
-```bash
-which libreoffice || which soffice || \
-  ls /Applications/LibreOffice.app/Contents/MacOS/soffice 2>/dev/null \
-  && echo "found" || echo "not found"
-```
+| Platform | Check command |
+|---|---|
+| macOS | `ls /Applications/LibreOffice.app/Contents/MacOS/soffice 2>/dev/null && echo found` |
+| Linux | `which libreoffice || which soffice` |
+| Windows | `where soffice.exe` |
 
-If not found:
-```
-LibreOffice is required for .<ext> files.
-  macOS:   brew install --cask libreoffice
-  Ubuntu:  sudo apt install libreoffice
-```
+If LibreOffice is not found, stop and tell the user:
+
+"LibreOffice is required to convert .<ext> files. Please install it and try again."
+
+| Platform | Install |
+|---|---|
+| macOS | `brew install --cask libreoffice` |
+| Ubuntu / Debian | `sudo apt install libreoffice` |
+| Windows | https://www.libreoffice.org/download/ |
+
+---
 
 ### Step 3 — Run the helper
 
@@ -72,21 +85,28 @@ python3 helpers/read_document.py "<file_path>" --output-dir /tmp/docx_out_$$
 python3 helpers/read_document.py "<file_path>" --no-images
 ```
 
+---
+
 ### Step 4 — Read the Markdown
 
-`result["markdown"]` contains the full document text. Use it to answer the
-user's question.
+`result["markdown"]` contains the full document text. Use it to answer the user's question.
+
+---
 
 ### Step 5 — Handle images
 
 | Model capability | Action |
 |---|---|
 | Supports vision (multimodal) | Pass `{mime_type, data}` from each `result["images"]` entry to the model alongside the Markdown |
-| Text-only | Skip images; tell user "N image(s) found but cannot be displayed in this context" |
+| Text-only | Skip images and tell the user "N image(s) were found but cannot be displayed in this context" |
+
+---
 
 ### Step 6 — Report warnings
 
 If `result["warnings"]` is non-empty, show them as informational notes.
+
+---
 
 ### Step 7 — Clean up (REQUIRED, always)
 
@@ -94,16 +114,21 @@ If `result["warnings"]` is non-empty, show them as informational notes.
 cleanup(result["tmp_dir"])
 ```
 
-Or bash fallback:
+Bash fallback (all platforms):
+
 ```bash
+# macOS / Linux
 rm -rf /tmp/docx_cowork_*
+
+# Windows (PowerShell)
+Remove-Item "$env:TEMP\docx_cowork_*" -Recurse -Force
 ```
 
 ---
 
 ## Conversion Reference
 
-| Extension | Path |
+| Extension | Conversion path |
 |---|---|
 | `.docx` | pandoc (native) |
 | `.odt` | pandoc (native) |
@@ -117,8 +142,8 @@ rm -rf /tmp/docx_cowork_*
 
 | Error | Response |
 |---|---|
-| `pandoc` not found | Install instructions, stop |
-| `LibreOffice` not found (`.doc`/`.pages`) | Install instructions, stop |
-| File not found | Ask user for path |
-| `ValueError` — unsupported format | List supported formats, stop |
-| Conversion `RuntimeError` | Show error, suggest checking the file |
+| `pandoc` not found | Show install instructions for all platforms, stop |
+| `LibreOffice` not found (`.doc` / `.pages`) | Show install instructions for all platforms, stop |
+| File not found | Ask user for the correct path |
+| `ValueError` — unsupported format | List supported formats, ask agent to check other skills |
+| Conversion `RuntimeError` | Show the error message, suggest checking the file is not corrupted |
