@@ -90,9 +90,9 @@ python3 helpers/read_document.py "<file_path>"
 
 ---
 
-### Step 4 — Check stats before reading
+### Step 4 — Decide what to read before reading anything
 
-Always check `info["stats"]` first to decide how much to load.
+After extracting, look at `info["stats"]` and the user's task together. Make all decisions here before loading any content.
 
 ```python
 stats = info["stats"]
@@ -102,10 +102,24 @@ stats = info["stats"]
 # stats["is_large"]    — True if char_count > 20,000
 ```
 
-| Document size | What to do |
+**Decision 1 — How much text to read:**
+
+| Situation | Decision |
 |---|---|
-| `is_large` is False (small, < 20K chars) | Read the full markdown in one call |
-| `is_large` is True (large) | Read only the sections relevant to the user's question |
+| `is_large` is False | Read the full file in one call |
+| `is_large` is True AND user wants a full summary or full extraction | Read the full file in chunks (100–200 lines at a time), do not skip anything |
+| `is_large` is True AND user has a specific question or wants a specific section | Read the first 100 lines to get structure, then read only the relevant section(s) |
+| `is_large` is True AND user wants just metadata (title, author, page count, etc.) | Read the first 50 lines only |
+
+**Decision 2 — Whether to read images:**
+
+| Situation | Decision |
+|---|---|
+| `image_count` is 0 | Skip — no images to load |
+| User's task is text-only (summarize, extract text, answer a text question) | Skip images |
+| User's task involves visuals (describe a chart, read a diagram, check a screenshot) | Load images |
+| Model does not support vision | Skip images; tell user "N image(s) were found but cannot be displayed in this context" |
+| Unsure whether images are relevant | Skip for now; mention to the user that N image(s) exist and offer to inspect them |
 
 ---
 
@@ -117,29 +131,37 @@ stats = info["stats"]
 text = read_lines(info["markdown_path"])
 ```
 
-**Large document — read only what you need:**
+**Large document — full summary or full extraction (read in chunks):**
 
 ```python
-# Read the first 100 lines to understand structure / table of contents
+chunk_size = 150
+total_lines = info["stats"]["line_count"]
+for start in range(0, total_lines, chunk_size):
+    chunk = read_lines(info["markdown_path"], start=start, end=start + chunk_size)
+    # process chunk
+```
+
+**Large document — specific question or section:**
+
+```python
+# Step 1: read first 100 lines to understand structure
 preview = read_lines(info["markdown_path"], start=0, end=100)
 
-# Read a specific section by line range (0-based, end is exclusive)
+# Step 2: identify the relevant line range from the preview
+# Step 3: read only that range
 section = read_lines(info["markdown_path"], start=200, end=350)
 ```
 
-Use the preview to locate the relevant section, then read only those lines. Do not load the entire file into context if it is large.
-
 ---
 
-### Step 6 — Handle images (only if needed)
+### Step 6 — Read images (on demand, only if decided in Step 4)
 
-Only load images if the user's task actually requires looking at visual content (charts, diagrams, screenshots, etc.).
-
-| Model capability | Action |
-|---|---|
-| Supports vision AND images are needed | Read each file in `info["image_paths"]` and pass to the model |
-| Text-only model | Skip images; tell user "N image(s) found but cannot be displayed in this context" |
-| Images not needed for the task | Skip images entirely |
+```python
+# Read each image file and pass to the model
+for image_path in info["image_paths"]:
+    # read image_path as bytes and pass to vision model
+    pass
+```
 
 ---
 
