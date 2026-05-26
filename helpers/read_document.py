@@ -46,11 +46,12 @@ SUPPORTED_FORMATS: frozenset[str] = frozenset({
     ".odt",    # OpenDocument Text (LibreOffice / OpenOffice Writer)
     ".rtf",    # Rich Text Format
     ".pages",  # Apple Pages
+    ".epub",   # Electronic publication (e-book)
 })
 
 # pandoc 3.x reads these directly without any pre-conversion step
 PANDOC_NATIVE: frozenset[str] = frozenset({
-    ".docx", ".odt", ".rtf",
+    ".docx", ".odt", ".rtf", ".epub",
 })
 
 # Require LibreOffice to export to .docx first, then pandoc finishes

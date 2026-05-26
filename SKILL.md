@@ -1,11 +1,10 @@
 ---
 name: docx-cowork
-description: |
+description: "
   Create, read, and update DOCX, DOC, ODT, RTF, and Apple Pages documents.
   Use this skill for any task involving word-processing files. Load the
-  relevant sub-skill based on what the user wants to do.
-tools: [bash, read_file, write_file]
-applyTo: "**"
+  relevant sub-skill based on what the user wants to do."
+license: "MIT"
 ---
 
 # docx-cowork
@@ -21,6 +20,7 @@ Agent skill for working with word-processing documents.
 | OpenDocument Text | `.odt` |
 | Rich Text Format | `.rtf` |
 | Apple Pages | `.pages` |
+| E-book | `.epub` |
 
 "Not supported: presentations (.ppt, .pptx, .key), spreadsheets (.xlsx, .numbers), web pages (.html), or markup files (.md, .rst). This skill cannot handle those. Ask the agent to check other available skills — one of them may be able to help."
 

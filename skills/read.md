@@ -3,7 +3,7 @@
 Read, summarize, analyze, or extract content from a word-processing document.
 
 **Helper:** `helpers/read_document.py`
-**Supported formats:** `.docx` `.doc` `.odt` `.rtf` `.pages`
+**Supported formats:** `.docx` `.doc` `.odt` `.rtf` `.pages` `.epub`
 
 "If the file is not one of those formats, this skill cannot help. Tell the user and ask the agent to check other available skills."
 
@@ -36,7 +36,7 @@ ls -lh "<file_path>"
 ```
 
 - File not found → ask the user for the correct path.
-- Extension not in `.docx .doc .odt .rtf .pages` → tell the user this format is not supported, list what is, and ask the agent to check other skills.
+- Extension not in `.docx .doc .odt .rtf .pages .epub` → tell the user this format is not supported, list what is, and ask the agent to check other skills.
 
 For `.doc` or `.pages`, also check whether LibreOffice is available:
 
@@ -133,6 +133,7 @@ Remove-Item "$env:TEMP\docx_cowork_*" -Recurse -Force
 | `.docx` | pandoc (native) |
 | `.odt` | pandoc (native) |
 | `.rtf` | pandoc (native) |
+| `.epub` | pandoc (native) |
 | `.doc` | LibreOffice → `.docx` → pandoc |
 | `.pages` | LibreOffice → `.docx` → pandoc |
 
