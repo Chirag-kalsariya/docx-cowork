@@ -2,32 +2,42 @@
 """
 read_document.py — Document reading helper for the docx-cowork agent skill.
 
-Supported word-processing formats only (no presentations, no web pages):
-  .docx           → pandoc directly (native)
-  .odt  .rtf      → pandoc directly (native)
-  .doc  .pages    → LibreOffice --headless → .docx → pandoc
+Uses only Python standard library + pandoc (external) + LibreOffice (external,
+only for .doc and .pages). No pip install required.
 
-Usage (CLI):
-    python3 helpers/read_document.py path/to/file.docx
-    python3 helpers/read_document.py path/to/file.pages --no-images
-    python3 helpers/read_document.py path/to/file.doc --output-dir ./out
+Supported word-processing formats:
+  .docx .odt .rtf .epub  → pandoc (native, no extra tool needed)
+  .doc  .pages           → LibreOffice --headless → .docx → pandoc
 
-Usage (Python API):
-    from helpers.read_document import read_document, cleanup
+The helper extracts the document to a temp directory and returns file paths
+and stats. It never returns inline content — the agent reads only the sections
+it needs, keeping the context window small.
 
-    result = read_document("report.docx", extract_images=True)
-    print(result["markdown"])
-    for img in result["images"]:   # empty list if no images / not requested
-        # img["mime_type"], img["data"] (base64 str), img["filename"]
-        pass
-    cleanup(result["tmp_dir"])     # always call when done
+Python API:
+    from helpers.read_document import extract, read_lines, cleanup
+
+    info = extract("report.docx", extract_images=True)
+    # info["markdown_path"]  → path to output.md  (read it yourself, in parts)
+    # info["image_paths"]    → ["/tmp/docx_cowork_.../media/img1.png", ...]
+    # info["stats"]          → {char_count, line_count, image_count, size_bytes}
+    # info["warnings"]       → non-fatal messages
+    # info["tmp_dir"]        → pass to cleanup() when done
+
+    # Read a specific range of lines (0-based, end is exclusive):
+    text = read_lines(info["markdown_path"], start=0, end=100)
+
+    cleanup(info["tmp_dir"])   # ALWAYS call when done
+
+CLI:
+    python3 helpers/read_document.py file.docx           # print stats
+    python3 helpers/read_document.py file.docx --lines 1-50   # print lines
+    python3 helpers/read_document.py file.docx --all          # print full markdown
+    python3 helpers/read_document.py file.docx --output-dir ./out  # save files
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
-import mimetypes
 import os
 import shutil
 import subprocess
@@ -36,35 +46,35 @@ import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Format classification  (word-processing documents only)
+# Format classification
 # ---------------------------------------------------------------------------
 
-# All formats this skill supports — used for user-facing error messages
 SUPPORTED_FORMATS: frozenset[str] = frozenset({
     ".docx",   # Microsoft Word (modern Open XML)
     ".doc",    # Microsoft Word (legacy binary)
-    ".odt",    # OpenDocument Text (LibreOffice / OpenOffice Writer)
+    ".odt",    # OpenDocument Text
     ".rtf",    # Rich Text Format
     ".pages",  # Apple Pages
-    ".epub",   # Electronic publication (e-book)
+    ".epub",   # E-book
 })
 
-# pandoc 3.x reads these directly without any pre-conversion step
 PANDOC_NATIVE: frozenset[str] = frozenset({
     ".docx", ".odt", ".rtf", ".epub",
 })
 
-# Require LibreOffice to export to .docx first, then pandoc finishes
 LIBREOFFICE_REQUIRED: frozenset[str] = frozenset({
     ".doc",    # legacy Word binary — pandoc 3.x dropped this format
-    ".pages",  # Apple Pages — pandoc has never supported this
+    ".pages",  # Apple Pages — never supported by pandoc
 })
 
-# Image extensions we care about passing to the model
 IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".png", ".jpg", ".jpeg", ".gif",
     ".webp", ".bmp", ".tiff", ".tif", ".svg",
 })
+
+# Documents smaller than this are considered "small" — safe to read in full.
+# Larger documents should be read in sections to protect the context window.
+SMALL_DOC_CHARS = 20_000
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +82,6 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 def _require_pandoc() -> str:
-    """Return pandoc path or raise with install hint."""
     path = shutil.which("pandoc")
     if not path:
         raise EnvironmentError(
@@ -86,15 +95,14 @@ def _require_pandoc() -> str:
 
 
 def _find_libreoffice() -> str | None:
-    """Return LibreOffice/soffice path, or None if not available."""
     candidates = [
         "libreoffice",
         "soffice",
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",   # macOS
-        "/usr/bin/libreoffice",                                    # Linux
-        "/usr/bin/soffice",                                        # Linux alt
-        r"C:\Program Files\LibreOffice\program\soffice.exe",       # Windows
-        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe", # Windows 32-bit
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",    # macOS
+        "/usr/bin/libreoffice",                                     # Linux
+        "/usr/bin/soffice",                                         # Linux alt
+        r"C:\Program Files\LibreOffice\program\soffice.exe",        # Windows
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",  # Windows 32-bit
     ]
     for cmd in candidates:
         found = shutil.which(cmd) or (os.path.isfile(cmd) and cmd)
@@ -108,11 +116,6 @@ def _find_libreoffice() -> str | None:
 # ---------------------------------------------------------------------------
 
 def _pandoc_to_docx(input_path: str, output_path: str) -> list[str]:
-    """
-    Convert a pandoc-supported format to DOCX.
-    Returns a list of warning strings (empty on clean success).
-    Raises RuntimeError on failure.
-    """
     pandoc = _require_pandoc()
     result = subprocess.run(
         [pandoc, input_path, "-o", output_path],
@@ -129,11 +132,6 @@ def _pandoc_to_docx(input_path: str, output_path: str) -> list[str]:
 
 
 def _libreoffice_to_docx(input_path: str, out_dir: str) -> str:
-    """
-    Use LibreOffice to convert input_path → DOCX inside out_dir.
-    Returns the path of the produced .docx file.
-    Raises EnvironmentError if LibreOffice is not found, RuntimeError on failure.
-    """
     lo = _find_libreoffice()
     if not lo:
         raise EnvironmentError(
@@ -151,11 +149,9 @@ def _libreoffice_to_docx(input_path: str, out_dir: str) -> str:
         raise RuntimeError(
             f"LibreOffice conversion failed (exit {result.returncode}):\n{result.stderr.strip()}"
         )
-    # LibreOffice writes <stem>.docx in out_dir
     stem = Path(input_path).stem
     produced = os.path.join(out_dir, stem + ".docx")
     if not os.path.isfile(produced):
-        # Sometimes LibreOffice writes with a slightly different stem; find it
         candidates = list(Path(out_dir).glob("*.docx"))
         if not candidates:
             raise RuntimeError(
@@ -165,58 +161,30 @@ def _libreoffice_to_docx(input_path: str, out_dir: str) -> str:
     return produced
 
 
-def convert_to_docx(file_path: str, tmp_dir: str) -> tuple[str, list[str]]:
-    """
-    Convert any supported document to DOCX.
-
-    Returns:
-        (docx_path, warnings)  — docx_path is inside tmp_dir.
-    Raises:
-        EnvironmentError  — missing required system tool
-        RuntimeError      — conversion failed
-    """
+def _convert_to_docx(file_path: str, tmp_dir: str) -> tuple[str, list[str]]:
     ext = Path(file_path).suffix.lower()
     warnings: list[str] = []
     docx_out = os.path.join(tmp_dir, "document.docx")
 
-    # Reject anything that is not a supported word-processing format
     if ext not in SUPPORTED_FORMATS:
         raise ValueError(
             f"Unsupported file format: '{ext}'.\n"
             "docx-cowork supports word-processing documents only.\n"
             "Supported: " + ", ".join(sorted(SUPPORTED_FORMATS))
         )
-
-    # Already DOCX — just copy so we have a clean working copy
     if ext == ".docx":
         shutil.copy2(file_path, docx_out)
         return docx_out, warnings
-
-    # Formats that need LibreOffice first
     if ext in LIBREOFFICE_REQUIRED:
         lo_docx = _libreoffice_to_docx(file_path, tmp_dir)
         shutil.move(lo_docx, docx_out)
         return docx_out, warnings
-
-    # Formats pandoc handles natively (.odt, .rtf)
+    # PANDOC_NATIVE
     warnings.extend(_pandoc_to_docx(file_path, docx_out))
     return docx_out, warnings
 
 
-# ---------------------------------------------------------------------------
-# DOCX → Markdown + image extraction
-# ---------------------------------------------------------------------------
-
-def docx_to_markdown(docx_path: str, tmp_dir: str, extract_images: bool = True) -> tuple[str, list[str]]:
-    """
-    Convert a DOCX file to Markdown.
-
-    If extract_images=True, images are written to tmp_dir/media/ and their
-    paths are returned in the second element.
-
-    Returns:
-        (markdown_text, [absolute_image_paths])
-    """
+def _docx_to_markdown(docx_path: str, tmp_dir: str, extract_images: bool) -> tuple[str, list[str]]:
     pandoc = _require_pandoc()
     md_path = os.path.join(tmp_dir, "output.md")
     media_dir = os.path.join(tmp_dir, "media")
@@ -232,9 +200,6 @@ def docx_to_markdown(docx_path: str, tmp_dir: str, extract_images: bool = True) 
             f"pandoc DOCX→Markdown failed (exit {result.returncode}):\n{result.stderr.strip()}"
         )
 
-    with open(md_path, "r", encoding="utf-8") as fh:
-        markdown = fh.read()
-
     image_paths: list[str] = []
     if extract_images and os.path.isdir(media_dir):
         for root, _, files in os.walk(media_dir):
@@ -242,60 +207,37 @@ def docx_to_markdown(docx_path: str, tmp_dir: str, extract_images: bool = True) 
                 if Path(fname).suffix.lower() in IMAGE_EXTENSIONS:
                     image_paths.append(os.path.join(root, fname))
 
-    return markdown, image_paths
-
-
-def _encode_images(image_paths: list[str]) -> list[dict]:
-    """
-    Base64-encode a list of image file paths.
-
-    Returns a list of dicts:
-        {
-            "filename": str,       # original filename
-            "mime_type": str,      # e.g. "image/png"
-            "data": str,           # base64-encoded content
-        }
-    """
-    encoded = []
-    for path in image_paths:
-        mime, _ = mimetypes.guess_type(path)
-        if not mime:
-            mime = "image/png"
-        with open(path, "rb") as fh:
-            b64 = base64.b64encode(fh.read()).decode("utf-8")
-        encoded.append({
-            "filename": Path(path).name,
-            "mime_type": mime,
-            "data": b64,
-        })
-    return encoded
+    return md_path, image_paths
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def read_document(file_path: str, extract_images: bool = True) -> dict:
+def extract(file_path: str, extract_images: bool = True) -> dict:
     """
-    Read a document and return its content as Markdown plus any embedded images.
+    Extract a document to a temp directory and return paths + stats.
 
-    Parameters:
-        file_path      — absolute or relative path to the document
-        extract_images — whether to extract and base64-encode embedded images
-
-    Returns a dict:
+    Returns:
         {
-            "markdown": str,          # full document as Markdown
-            "images":   list[dict],   # [{filename, mime_type, data}] or []
-            "warnings": list[str],    # non-fatal messages from conversion
-            "tmp_dir":  str,          # MUST be passed to cleanup() when done
+            "markdown_path": str,     # absolute path to output.md
+            "image_paths":  list[str],# absolute paths to extracted images
+            "stats": {
+                "char_count":  int,   # characters in the markdown
+                "line_count":  int,   # lines in the markdown
+                "image_count": int,   # number of extracted images
+                "size_bytes":  int,   # byte size of the markdown file
+                "is_large":    bool,  # True if > SMALL_DOC_CHARS chars
+            },
+            "warnings": list[str],
+            "tmp_dir":  str,          # pass to cleanup() when done
         }
 
     Raises:
-        FileNotFoundError  — file_path does not exist
-        ValueError         — unsupported file format
-        EnvironmentError   — required tool (pandoc / LibreOffice) not installed
-        RuntimeError       — conversion or extraction failed
+        FileNotFoundError  — file does not exist
+        ValueError         — unsupported format
+        EnvironmentError   — pandoc or LibreOffice not installed
+        RuntimeError       — conversion failed
     """
     file_path = os.path.abspath(file_path)
     if not os.path.isfile(file_path):
@@ -303,105 +245,128 @@ def read_document(file_path: str, extract_images: bool = True) -> dict:
 
     tmp_dir = tempfile.mkdtemp(prefix="docx_cowork_")
     try:
-        docx_path, warnings = convert_to_docx(file_path, tmp_dir)
-        markdown, image_paths = docx_to_markdown(docx_path, tmp_dir, extract_images)
-        images = _encode_images(image_paths) if extract_images else []
+        docx_path, warnings = _convert_to_docx(file_path, tmp_dir)
+        md_path, image_paths = _docx_to_markdown(docx_path, tmp_dir, extract_images)
+
+        size_bytes = os.path.getsize(md_path)
+        with open(md_path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        char_count = len(content)
+        line_count = content.count("\n") + 1
 
         return {
-            "markdown": markdown,
-            "images": images,
+            "markdown_path": md_path,
+            "image_paths": image_paths,
+            "stats": {
+                "char_count":  char_count,
+                "line_count":  line_count,
+                "image_count": len(image_paths),
+                "size_bytes":  size_bytes,
+                "is_large":    char_count > SMALL_DOC_CHARS,
+            },
             "warnings": warnings,
             "tmp_dir": tmp_dir,
         }
     except Exception:
-        # Clean up on error so callers don't have to
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
 
+def read_lines(markdown_path: str, start: int = 0, end: int | None = None) -> str:
+    """
+    Read a range of lines from the extracted markdown file.
+
+    Parameters:
+        markdown_path — path from extract()["markdown_path"]
+        start         — first line to return (0-based, inclusive)
+        end           — last line to return (0-based, exclusive); None = end of file
+
+    Returns the selected lines as a single string.
+    """
+    with open(markdown_path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+    selected = lines[start:end]
+    return "".join(selected)
+
+
 def cleanup(tmp_dir: str) -> None:
     """
-    Delete the temporary directory created by read_document().
-    Always call this when you are done with the result, even if an error occurred.
+    Delete the temporary directory created by extract().
+    Always call this when done, even if an error occurred.
     """
     if tmp_dir:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Read a document and print its Markdown content.",
+        description="Extract a document and inspect its content.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("file", help="Path to the document to read")
+    p.add_argument("file", help="Path to the document")
+    p.add_argument("--no-images", action="store_true", help="Skip image extraction")
+    p.add_argument("--all", action="store_true", help="Print the full markdown to stdout")
     p.add_argument(
-        "--no-images",
-        action="store_true",
-        help="Skip image extraction (faster, smaller output)",
+        "--lines", metavar="START-END",
+        help="Print a line range, e.g. --lines 1-50 (1-based, inclusive)"
     )
     p.add_argument(
-        "--output-dir",
-        metavar="DIR",
-        help="Save output.md and extracted images here instead of printing to stdout",
-    )
-    p.add_argument(
-        "--json",
-        action="store_true",
-        help="Print the full result dict as JSON (includes base64 image data)",
+        "--output-dir", metavar="DIR",
+        help="Save output.md and images to this directory"
     )
     return p
 
 
 def main() -> None:
     args = _build_parser().parse_args()
-    extract = not args.no_images
 
     try:
-        result = read_document(args.file, extract_images=extract)
+        info = extract(args.file, extract_images=not args.no_images)
     except (FileNotFoundError, ValueError, EnvironmentError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
     try:
-        if args.json:
-            import json
-            # Don't include tmp_dir in JSON output
-            out = {k: v for k, v in result.items() if k != "tmp_dir"}
-            print(json.dumps(out, indent=2))
+        s = info["stats"]
+        print(f"Extracted: {info['markdown_path']}")
+        print(f"Stats    : {s['char_count']:,} chars | {s['line_count']:,} lines | "
+              f"{s['image_count']} image(s) | {s['size_bytes']:,} bytes")
+        if s["is_large"]:
+            print(f"Note     : large document (>{SMALL_DOC_CHARS:,} chars) — read in sections")
+        if info["image_paths"]:
+            print("Images   :")
+            for p in info["image_paths"]:
+                print(f"  {p}")
 
-        elif args.output_dir:
-            out_dir = os.path.abspath(args.output_dir)
-            os.makedirs(out_dir, exist_ok=True)
+        if args.output_dir:
+            out = os.path.abspath(args.output_dir)
+            os.makedirs(out, exist_ok=True)
+            shutil.copy2(info["markdown_path"], os.path.join(out, "output.md"))
+            for p in info["image_paths"]:
+                shutil.copy2(p, os.path.join(out, Path(p).name))
+            print(f"Saved to : {out}")
 
-            md_out = os.path.join(out_dir, "output.md")
-            with open(md_out, "w", encoding="utf-8") as fh:
-                fh.write(result["markdown"])
-            print(f"Markdown → {md_out}")
+        elif args.all:
+            print("\n" + read_lines(info["markdown_path"]))
 
-            for img in result["images"]:
-                img_out = os.path.join(out_dir, img["filename"])
-                with open(img_out, "wb") as fh:
-                    fh.write(base64.b64decode(img["data"]))
-                print(f"Image    → {img_out}  ({img['mime_type']})")
+        elif args.lines:
+            parts = args.lines.split("-")
+            start = max(0, int(parts[0]) - 1)
+            end   = int(parts[1]) if len(parts) > 1 else None
+            print("\n" + read_lines(info["markdown_path"], start, end))
 
-        else:
-            print(result["markdown"])
-            if result["images"]:
-                print(f"\n[{len(result['images'])} image(s) extracted — "
-                      "use --output-dir to save them]", file=sys.stderr)
-
-        if result["warnings"]:
+        if info["warnings"]:
             print("\nWarnings:", file=sys.stderr)
-            for w in result["warnings"]:
+            for w in info["warnings"]:
                 print(f"  • {w}", file=sys.stderr)
 
     finally:
-        cleanup(result.get("tmp_dir", ""))
+        cleanup(info.get("tmp_dir", ""))
 
 
 if __name__ == "__main__":
